@@ -1,0 +1,4 @@
+name = "JFPI"
+uuid = "65a7e417-7183-4b90-ae73-bebdcd3bb40c"
+authors = ["Will Saunders <will.saunders@ukaea.uk>"]
+version = "0.1.0"
