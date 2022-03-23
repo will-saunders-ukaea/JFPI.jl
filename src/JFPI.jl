@@ -1,6 +1,7 @@
 module JFPI
 
 using PPMD
+using MPI
 
 export DGProject2D
 export set_eval_positions
@@ -353,6 +354,54 @@ Free a DGProject2D struct
 function free(dgp::DGProject2D)
     PPMD.free(dgp.particle_group_eval)
 end
+
+
+"""
+Utility function to create a uniform grid of particles with gaussian weight.
+"""
+function uniform_grid_gaussian_weights(N_side, A)
+    rank = MPI.Comm_rank(A.domain.comm)
+    extent = A.domain.extent
+    target_device = A.compute_target
+    if rank == 0
+        positions, weights = uniform_2d(N_side, extent[1])
+        add_particles(
+            A,
+            Dict(
+                 "P" => positions,
+                 "Q" => weights * ones(Float64, (N_side * N_side, 1))
+            )
+        )
+    else
+        add_particles(A)
+    end
+
+    # compute the correct values at the eval points
+    assign_loop = ParticleLoop(
+        target_device,
+        Kernel(
+            "assign_func_eval",
+            """
+            x = P[ix, 1]
+            y = P[ix, 2]
+            Q[ix, 1] = (2.0 / sqrt(pi)) * exp(-(2.0 * ((x - 0.5)^2 + (y - 0.5)^2))) * Q[ix, 1]
+            """
+        ),
+        Dict(
+             "P" => (A["P"], READ),
+             "Q" => (A["Q"], WRITE),
+        )
+    )
+    execute(assign_loop)
+end
+
+
+
+
+
+
+
+
 
 
 end # module

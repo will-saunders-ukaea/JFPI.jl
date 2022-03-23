@@ -2,7 +2,7 @@ using PPMD
 using JFPI
 
 using SpecialFunctions
-
+using MPI
 
 """
 [0, 1] to [-1, 1]
@@ -98,41 +98,9 @@ function main()
     )
     
     dg_project_2d = DGProject2D(A, p, 16, 16)
-
+    JFPI.uniform_grid_gaussian_weights(N_side, A)
 
     reset_profile()
-    
-    if rank == 0
-        #positions, weights = gaussian_2d(N_side, extent)
-        positions, weights = uniform_2d(N_side, extent)
-        add_particles(
-            A,
-            Dict(
-                 "P" => positions,
-                 "Q" => weights * ones(Float64, (N_side * N_side, 1))
-            )
-        )
-    else
-        add_particles(A)
-    end
-
-    # compute the correct values at the eval points
-    assign_loop = ParticleLoop(
-        target_device,
-        Kernel(
-            "assign_func_eval",
-            """
-            x = P[ix, 1]
-            y = P[ix, 2]
-            Q[ix, 1] = (2.0 / sqrt(pi)) * exp(-(2.0 * ((x - 0.5)^2 + (y - 0.5)^2))) * Q[ix, 1]
-            """
-        ),
-        Dict(
-             "P" => (A["P"], READ),
-             "Q" => (A["Q"], WRITE),
-        )
-    )
-    execute(assign_loop)
 
     # set eval positions
     if rank == 0
@@ -166,7 +134,7 @@ function main()
 
 
     write(ParticleGroupVTK("function_evals", dg_project_2d.particle_group_eval))
-    free(A)
+    PPMD.free(A)
     JFPI.free(dg_project_2d)
 
 end
