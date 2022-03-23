@@ -2,3 +2,6 @@ name = "JFPI"
 uuid = "65a7e417-7183-4b90-ae73-bebdcd3bb40c"
 authors = ["Will Saunders <will.saunders@ukaea.uk>"]
 version = "0.1.0"
+
+[deps]
+PPMD = "d34cf64c-c676-4d9c-b1a4-7b967ea2c402"
