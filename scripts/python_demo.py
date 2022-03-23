@@ -16,7 +16,7 @@ if __name__ == "__main__":
     target_device = PPMD.KACPU()
     #target_device = PPMD.KACUDADevice(128)
     
-    N_side = 100
+    N_side = 1000
     p = 1
     extent = 1.0
     nx = 16
@@ -45,17 +45,27 @@ if __name__ == "__main__":
 
 
     dg_project_2d = JFPI.DGProject2D(A, p, 16, 16)
+ 
+
+    mesh = PeriodicSquareMesh(nx, nx, extent, quadrilateral=True)
+    V = FunctionSpace(mesh, "DG", p)
+    W = VectorFunctionSpace(mesh, V.ufl_element())
+    X = interpolate(mesh.coordinates, W)
+    eval_points = X.dat.data_ro.copy()
     
-    if rank == 0:
-        positions, weights = JFPI.uniform_2d(50, extent)
-        JFPI.set_eval_positions(dg_project_2d, positions)
-    else:
-        JFPI.set_eval_positions(dg_project_2d)
+    JFPI.set_eval_positions(dg_project_2d, eval_points)
 
 
     JFPI.project_evaluate(dg_project_2d)
-
-
     PPMD.write(PPMD.ParticleGroupVTK("function_evals", dg_project_2d.particle_group_eval))
+
     
+    function_evals = JFPI.get_function_evaluations(dg_project_2d)
+    f = Function(V)
+    f.dat.data[:] = function_evals[:, 0]
+
+    outfile = File("firedrake_output.pvd")
+    outfile.write(f)
+
+
 

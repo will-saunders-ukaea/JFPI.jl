@@ -396,12 +396,12 @@ function uniform_grid_gaussian_weights(N_side, A)
 end
 
 
-
-
-
-
-
-
+"""
+Utility interface to get the evaluations back in Python.
+"""
+function get_function_evaluations(dgp::DGProject2D)
+    return dgp.particle_group_eval["Q"][1:dgp.particle_group_eval.npart_local, :]
+end
 
 
 end # module
