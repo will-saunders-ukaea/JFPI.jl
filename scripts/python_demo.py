@@ -44,15 +44,18 @@ if __name__ == "__main__":
     PPMD.write(PPMD.ParticleGroupVTK("particle_positions", A))
 
 
-
-
-
     dg_project_2d = JFPI.DGProject2D(A, p, 16, 16)
     
+    if rank == 0:
+        positions, weights = JFPI.uniform_2d(50, extent)
+        JFPI.set_eval_positions(dg_project_2d, positions)
+    else:
+        JFPI.set_eval_positions(dg_project_2d)
 
 
+    JFPI.project_evaluate(dg_project_2d)
 
 
+    PPMD.write(PPMD.ParticleGroupVTK("function_evals", dg_project_2d.particle_group_eval))
     
-
 
