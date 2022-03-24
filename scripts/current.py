@@ -17,7 +17,7 @@ if __name__ == "__main__":
     target_device = PPMD.KACPU()
     #target_device = PPMD.KACUDADevice(128)
     
-    N_side = 1000
+    N_side = 2000
     p = 1
     extent = 1.0
     nx = 32
@@ -101,18 +101,11 @@ if __name__ == "__main__":
 
 
     JFPI.set_eval_positions(dg_project_2d, eval_points)
-
-
-
-
-    PPMD.write(PPMD.ParticleGroupVTK("function_evals", dg_project_2d.particle_group_eval))
-
-
-
     JFPI.project_evaluate(dg_project_2d, "J")
     function_evals = JFPI.get_function_evaluations(dg_project_2d, "J")
     fv.dat.data[:] = function_evals[:]
 
+    PPMD.write(PPMD.ParticleGroupVTK("function_evals", dg_project_2d.particle_group_eval))
     outfile = File("current.pvd")
     outfile.write(fv)
 
