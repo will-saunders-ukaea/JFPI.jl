@@ -16,7 +16,7 @@ if __name__ == "__main__":
     target_device = PPMD.KACPU()
     #target_device = PPMD.KACUDADevice(128)
     
-    N_side = 1000
+    N_side = 2000
     p = 1
     extent = 1.0
     nx = 16
@@ -32,8 +32,6 @@ if __name__ == "__main__":
         domain,
         {
             "P": PPMD.ParticleDat(2, position=True),
-            "P_REFERENCE": PPMD.ParticleDat(2),
-            "BASIS_EVAL": PPMD.ParticleDat(domain.ndim * (p+1)),
             "Q": PPMD.ParticleDat(1),
         },
         target_device
@@ -44,23 +42,37 @@ if __name__ == "__main__":
     PPMD.write(PPMD.ParticleGroupVTK("particle_positions", A))
 
 
-    dg_project_2d = JFPI.DGProject2D(A, p, 16, 16)
+    dg_project_2d = JFPI.DGProject2D(A, p, nx, nx)
  
 
     mesh = PeriodicSquareMesh(nx, nx, extent, quadrilateral=True)
-    V = FunctionSpace(mesh, "DG", p)
+    V = FunctionSpace(mesh, "DQ", p)
     W = VectorFunctionSpace(mesh, V.ufl_element())
     X = interpolate(mesh.coordinates, W)
     eval_points = X.dat.data_ro.copy()
     
     JFPI.set_eval_positions(dg_project_2d, eval_points)
+    
+
+    JFPI.project_evaluate(dg_project_2d, "Q")
+
+    #for stepx in range(100):
+    #    JFPI.project_evaluate(dg_project_2d)
+    #Nrun = 1000
+    #import time
+    #PPMD.reset_profile()
+    #t0 = time.time()
+    #for stepx in range(Nrun):
+    #    JFPI.project_evaluate(dg_project_2d)
+    #if rank == 0:
+    #    print((time.time() - t0) / Nrun)
+    #    PPMD.print_profile()
 
 
-    JFPI.project_evaluate(dg_project_2d)
     PPMD.write(PPMD.ParticleGroupVTK("function_evals", dg_project_2d.particle_group_eval))
 
     
-    function_evals = JFPI.get_function_evaluations(dg_project_2d)
+    function_evals = JFPI.get_function_evaluations(dg_project_2d, "Q")
     f = Function(V)
     f.dat.data[:] = function_evals[:, 0]
 
@@ -68,4 +80,8 @@ if __name__ == "__main__":
     outfile.write(f)
 
 
-
+    g = Function(V)
+    x, y = SpatialCoordinate(mesh)
+    g.interpolate((2.0 / sqrt(pi)) * exp(-(2.0 * ((x - 0.5)**2 + (y - 0.5)**2))))
+    outfile = File("firedrake_correct.pvd")
+    outfile.write(g)

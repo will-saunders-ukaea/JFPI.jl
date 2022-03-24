@@ -120,13 +120,13 @@ mutable struct DGProject2D
         
         target_device = particle_group_source.compute_target
         domain = particle_group_source.domain
+        ndim = domain.ndim
         particle_group_eval = ParticleGroup(
             domain,
             Dict(
                  "P" => ParticleDat(domain.ndim, position=true),
-                 "P_REFERENCE" => ParticleDat(domain.ndim),
-                 "BASIS_EVAL" => ParticleDat(domain.ndim * (p+1)),
-                 "Q" => ParticleDat(1),
+                 "_P_REFERENCE" => ParticleDat(domain.ndim),
+                 "_BASIS_EVAL" => ParticleDat(domain.ndim * (p+1)),
             ),
             target_device
         )
@@ -156,7 +156,7 @@ mutable struct DGProject2D
                     shifted_position = P[ix, dimx] - origin
                     # map onto [-1, 1]
                     scaled_position = 2.0 * (shifted_position / width) - 1.0
-                    P_REFERENCE[ix, dimx] = scaled_position
+                    _P_REFERENCE[ix, dimx] = scaled_position
                 end
                 """
             ),
@@ -165,8 +165,8 @@ mutable struct DGProject2D
                 "WIDTHS" => (cell_widths, READ),
             ),
             Dict(
-                "P" => (PG["P"], READ),
-                "P_REFERENCE" => (PG["P_REFERENCE"], READ),
+                "P" => (PG[PG.position_dat], READ),
+                "_P_REFERENCE" => (PPMD.get_add_dat(PG, "_P_REFERENCE", ndim, Float64), READ),
             )
            ) for PG in [A, E]]
 
@@ -175,16 +175,16 @@ mutable struct DGProject2D
             target_device,
             Kernel(
                 "basis_func_eval",
-                get_legendre_product_eval_kernel(p, domain.ndim, "P_REFERENCE", "BASIS_EVAL")
+                get_legendre_product_eval_kernel(p, domain.ndim, "_P_REFERENCE", "_BASIS_EVAL")
             ),
             Dict(
-                 "P_REFERENCE" => (PG["P_REFERENCE"], READ),
-                 "BASIS_EVAL" => (PG["BASIS_EVAL"], WRITE),
+                "_P_REFERENCE" => (PG["_P_REFERENCE"], READ),
+                "_BASIS_EVAL" => (PPMD.get_add_dat(PG, "_BASIS_EVAL", ndim * (p+1), Float64), WRITE),
             )
            ) for PG in [A, E]]
 
         # space for dofs in each cell
-        cell_dofs = CellDat(mesh, ((p+1) ^ domain.ndim, 1), Float64, target_device)
+        cell_dofs = Dict{Int, CellDat}()
         # indices to combine for each dof
         cell_basis_indices = CellDat(mesh, ((p+1) ^ domain.ndim, domain.ndim), Int32, target_device)
         # inverse mass matrix diagonal
@@ -204,53 +204,13 @@ mutable struct DGProject2D
         end
 
         # pairloop to assemble dofs
-        assemble_pairloop = PairLoop(
-            target_device,
-            Kernel(
-                "assemble_pairloop",
-                """
-                contribution = Q[ix, 1]
-                for dimx in 1:$(domain.ndim)
-                    contribution *= BASIS_EVAL[ix, INDICES[dimx]]
-                end
-                DOFS[1] += contribution * IMASS[1]
-                """
-            ),
-            Dict(
-                 "INDICES" => (cell_basis_indices, READ),
-                 "IMASS" => (cell_basis_invmass, READ),
-                 "DOFS" => (cell_dofs, INC_ZERO),
-            ),
-            Dict(
-                "BASIS_EVAL" => (A["BASIS_EVAL"], READ),
-                "Q" => (A["Q"], READ),
-            ),
-        )
-
+        # these pairloops are made per source ParticleDat
+        assemble_pairloop = Dict{String, Any}()
 
         # pairloop to evaluate field at points in E
-        eval_pairloop = PairLoop(
-            target_device,
-            Kernel(
-                "eval_pairloop",
-                """
-                contribution = DOFS[1]
-                for dimx in 1:$(domain.ndim)
-                    contribution *= BASIS_EVAL[ix, INDICES[dimx]]
-                end
-                Q[ix, 1] += contribution
-                """
-            ),
-            Dict(
-                 "INDICES" => (cell_basis_indices, READ),
-                 "IMASS" => (cell_basis_invmass, READ),
-                 "DOFS" => (cell_dofs, READ),
-            ),
-            Dict(
-                "BASIS_EVAL" => (E["BASIS_EVAL"], READ),
-                "Q" => (E["Q"], INC_ZERO),
-            ),
-        )
+        # these pairloops are assembled per number of components
+        # i.e. there is a seperate PairLoop for scalars and vectors
+        eval_pairloop = Dict{Int, Any}()
 
         n = new(
             p, 
@@ -286,11 +246,14 @@ function set_eval_positions(dgp, positions=nothing, cells=nothing)
 
     @assert dgp.particle_group_eval.npart_local == 0
     
+    # use provided cell ids if they exist
     data = Dict()
     if !isnothing(cells)
         data[cellid_particle_dat(dgp.particle_group_eval, dgp.mesh)] = cells
     end
-
+    
+    # cases where positions are defined only on rank zero will have positions
+    # of nothing
     if !isnothing(positions)
         data["P"] = positions
         add_particles(dgp.particle_group_eval, data)
@@ -314,9 +277,70 @@ end
 
 
 """
+Get a ParticleDat name for the projection of a source ParticleDat
+"""
+function get_output_name(dgp, quantity)
+    ncomp = dgp.particle_group_source[quantity].ncomp
+    dat_name = "_Q$ncomp"
+    return dat_name
+end
+
+
+"""
 Project the particle information onto the Legendre DOFs
 """
-function project(dgp)
+function project(dgp, quantity)
+
+    if haskey(dgp.assemble_pairloop, quantity)
+        assemble_pairloop = dgp.assemble_pairloop[quantity]
+    else
+        # create the pairloop that projects the requested quantity onto
+        # the mesh if it does not exist already
+
+        target_device = dgp.particle_group_source.compute_target
+        ncomp = dgp.particle_group_source[quantity].ncomp
+        if haskey(dgp.cell_dofs, ncomp)
+            cell_dofs_dat = dgp.cell_dofs[ncomp]
+        else
+            @assert dgp.particle_group_source[quantity].dtype == Float64
+            domain = dgp.mesh.domain
+            cell_dofs_dat = CellDat(dgp.mesh, ((dgp.p+1) ^ domain.ndim, ncomp), Float64, target_device)
+            dgp.cell_dofs[ncomp] = cell_dofs_dat
+        end
+
+        # space for dofs in each cell
+        # pairloop to assemble dofs
+        A = dgp.particle_group_source
+        assemble_pairloop = PairLoop(
+            target_device,
+            Kernel(
+                "assemble_pairloop",
+                """
+                basis_eval = _BASIS_EVAL[ix, INDICES[1]]
+                for dimx in 2:$(domain.ndim)
+                    basis_eval *= _BASIS_EVAL[ix, INDICES[dimx]]
+                end
+                for quantityx in 1:$ncomp
+                    contribution = Q[ix, quantityx]
+                    DOFS[quantityx] += basis_eval * contribution * IMASS[1]
+                end
+                """
+            ),
+            Dict(
+                 "INDICES" => (dgp.cell_basis_indices, READ),
+                 "IMASS" => (dgp.cell_basis_invmass, READ),
+                 "DOFS" => (cell_dofs_dat, INC_ZERO),
+            ),
+            Dict(
+                "_BASIS_EVAL" => (A["_BASIS_EVAL"], READ),
+                "Q" => (A[quantity], READ),
+            ),
+        )
+
+        dgp.assemble_pairloop[quantity] = assemble_pairloop
+    end
+
+
     # bin particles into cells
     execute(dgp.cell_bin_loop_A)
 
@@ -327,24 +351,77 @@ function project(dgp)
     execute(dgp.basis_eval_loop_A)
     
     # assemble dofs
-    execute(dgp.assemble_pairloop)
+    execute(assemble_pairloop)
 end
 
 
 """
 Evaluate the projected field at the evaluation positions.
 """
-function evaluate(dgp)
-    execute(dgp.eval_pairloop)
+function evaluate(dgp, quantity)
+
+    ncomp = dgp.particle_group_source[quantity].ncomp
+
+    # Create the output ParticleDat if it does not exist already
+    dat_name = get_output_name(dgp, quantity)
+    if haskey(dgp.particle_group_eval.particle_dats, dat_name)
+        output_dat = dgp.particle_group_eval.particle_dats[dat_name]
+    else
+        output_dat = PPMD.get_add_dat(dgp.particle_group_eval, dat_name, ncomp, Float64)
+    end
+    
+    # get the PairLoop that evaluates the quantity at the requested positions.
+    if haskey(dgp.eval_pairloop, ncomp)
+        eval_pairloop = dgp.eval_pairloop[ncomp]
+    else
+        cell_dofs_dat = dgp.cell_dofs[ncomp]
+
+        target_device = dgp.particle_group_source.compute_target
+
+        E = dgp.particle_group_eval
+        ndim = E.domain.ndim
+
+        # pairloop to evaluate field at points in E
+        eval_pairloop = PairLoop(
+            target_device,
+            Kernel(
+                "eval_pairloop",
+                """
+                basis_eval = _BASIS_EVAL[ix, INDICES[1]]
+                for dimx in 2:$(ndim)
+                    basis_eval *= _BASIS_EVAL[ix, INDICES[dimx]]
+                end
+                for quantityx in 1:$ncomp
+                    contribution = DOFS[quantityx]
+                    Q[ix, quantityx] += basis_eval * contribution
+                end
+                """
+            ),
+            Dict(
+                 "INDICES" => (dgp.cell_basis_indices, READ),
+                 "IMASS" => (dgp.cell_basis_invmass, READ),
+                 "DOFS" => (cell_dofs_dat, READ),
+            ),
+            Dict(
+                "_BASIS_EVAL" => (E["_BASIS_EVAL"], READ),
+                "Q" => (output_dat, INC_ZERO),
+            ),
+        )
+        dgp.eval_pairloop[ncomp] = eval_pairloop
+    end
+
+    execute(eval_pairloop)
+
+    return dat_name
 end
 
 
 """
 Project particle data and evaluate at the required positions.
 """
-function project_evaluate(dgp)
-    project(dgp)
-    evaluate(dgp)
+function project_evaluate(dgp, quantity)
+    project(dgp, quantity)
+    evaluate(dgp, quantity)
 end
 
 
@@ -399,8 +476,9 @@ end
 """
 Utility interface to get the evaluations back in Python.
 """
-function get_function_evaluations(dgp::DGProject2D)
-    return dgp.particle_group_eval["Q"][1:dgp.particle_group_eval.npart_local, :]
+function get_function_evaluations(dgp::DGProject2D, quantity::String)
+    dat_name = get_output_name(dgp, quantity)
+    return dgp.particle_group_eval[dat_name][1:dgp.particle_group_eval.npart_local, :]
 end
 
 

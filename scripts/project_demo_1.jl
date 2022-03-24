@@ -75,9 +75,9 @@ function main()
     target_device = KACPU()
     #target_device = KACUDADevice(128)
     
-    N_side = 100
+    N_side = 1000
     N_sample_side = 50
-    p = 1
+    p = 2
     extent = 1.0
 
     extents = (extent, extent)
@@ -89,10 +89,7 @@ function main()
         domain,
         Dict(
              "P" => ParticleDat(2, position=true),
-             "P_REFERENCE" => ParticleDat(2),
-             "BASIS_EVAL" => ParticleDat(domain.ndim * (p+1)),
              "Q" => ParticleDat(1),
-             "QC" => ParticleDat(1),
         ),
         target_device
     )
@@ -111,29 +108,12 @@ function main()
     end
 
     write(ParticleGroupVTK("particle_positions", A))
-
-
-    for ix in 1:100
-        project_evaluate(dg_project_2d)
-        if rank == 0
-            @show ix
-        end
-    end
     
-    N_step = 1000
-    reset_profile()
-    time_start = time()
-    for ix in 1:N_step
-        project_evaluate(dg_project_2d)
-    end
-    time_end = time()
-    if rank == 0
-        print_profile()
-        @show (time_end - time_start)/N_step
-    end
-
+    project_evaluate(dg_project_2d, "P")
 
     write(ParticleGroupVTK("function_evals", dg_project_2d.particle_group_eval))
+
+
     PPMD.free(A)
     JFPI.free(dg_project_2d)
 
