@@ -85,3 +85,29 @@ if __name__ == "__main__":
     g.interpolate((2.0 / sqrt(pi)) * exp(-(2.0 * ((x - 0.5)**2 + (y - 0.5)**2))))
     outfile = File("firedrake_correct.pvd")
     outfile.write(g)
+
+
+    VV = VectorFunctionSpace(mesh, family='DQ', degree=p, dim=2)
+    fv = Function(VV)
+
+    #WV = VectorFunctionSpace(mesh, VV.ufl_element())
+    #XV = interpolate(mesh.coordinates, WV)
+    #eval_points = XV.dat.data_ro.copy()
+    #import pdb; pdb.set_trace()
+
+
+    JFPI.project_evaluate(dg_project_2d, "P")
+    function_evals = JFPI.get_function_evaluations(dg_project_2d, "P")
+    fv.dat.data[:] = function_evals[:]
+
+    outfile = File("firedrake_output_2.pvd")
+    outfile.write(fv)
+
+
+
+
+
+
+
+
+
