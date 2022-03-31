@@ -95,6 +95,7 @@ function main()
     )
     
     dg_project_2d = DGProject2D(A, p, 16, 16)
+
     JFPI.uniform_grid_gaussian_weights(N_side, A)
 
     reset_profile()
@@ -109,7 +110,7 @@ function main()
 
     write(ParticleGroupVTK("particle_positions", A))
     
-    project_evaluate(dg_project_2d, "P")
+    project_evaluate(dg_project_2d, "Q")
 
     write(ParticleGroupVTK("function_evals", dg_project_2d.particle_group_eval))
 

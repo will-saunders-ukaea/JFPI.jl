@@ -87,7 +87,6 @@ if __name__ == "__main__":
 
     PPMD.write(PPMD.ParticleGroupVTK("particle_state", A))
 
-
     dg_project_2d = JFPI.DGProject2D(A, p, nx, nx)
  
 
