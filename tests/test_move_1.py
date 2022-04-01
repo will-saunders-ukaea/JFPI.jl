@@ -90,7 +90,7 @@ def test_advect_diagonal():
 
 
     
-    PPMD.write(PPMD.ParticleGroupVTK("particle_positions", A))
+    #PPMD.write(PPMD.ParticleGroupVTK("particle_positions", A))
 
     
     JFPI.set_eval_positions(dg_project_2d, eval_points)
@@ -103,7 +103,7 @@ def test_advect_diagonal():
 
     project()
 
-    outfile = File("f.pvd")
+    #outfile = File("f.pvd")
     
     cell_width = extent / nx
     
@@ -126,7 +126,7 @@ def test_advect_diagonal():
 
 
 
-    outfile.write(f)
+    #outfile.write(f)
     check_errors()
 
     #advect particles by one cell
@@ -148,7 +148,7 @@ def test_advect_diagonal():
         PPMD.execute(advect_loop)
         PPMD.global_move(A)
         project()
-        outfile.write(f)
+        #outfile.write(f)
 
         offset_x += 1
         offset_y += 1
