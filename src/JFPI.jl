@@ -1,5 +1,6 @@
 module JFPI
 
+using Polynomials
 using PPMD
 using MPI
 
@@ -9,6 +10,34 @@ export project
 export evaluate
 export project_evaluate
 export free
+
+
+
+
+"""
+Workaround for julia not allowing calling unique with a custom comparison
+function.
+"""
+struct F1
+    a
+    b
+end
+Base.isequal(a::F1, b::F1) = abs(a.a - b.a) < 10.0^(a.b)
+Base.hash(x::F1, h::UInt) = hash(0, h)
+function approx_unique(array, tol_exponent)
+    array = unique([F1(ax, tol_exponent) for ax in Iterators.flatten(array)])
+    return [ax.a for ax in array]
+end
+
+
+"""
+Extact the p+1 nodal points from array of points assuming no duplicates.
+"""
+function extract_nodes(p, array)
+    candidates = approx_unique(array, -8)
+    @assert length(candidates) == p+1
+    return candidates
+end
 
 
 """
@@ -114,7 +143,10 @@ mutable struct DGProject2D
     cell_basis_invmass
     assemble_pairloop
     eval_pairloop
-
+    
+    # variables for evaluating FEM functions at particle locations
+    nodes
+    basis_eval_loop_leg_A
 
     function DGProject2D(particle_group_source::ParticleGroup, p::Int64, nx::Int64, ny::Int64)
         
@@ -240,6 +272,139 @@ end
 
 
 """
+Evaluate function at source particle positions.
+"""
+function evaluate_function(dgp, function_evals)
+
+    # set the evaluations on the evaluation points
+    dgp.particle_group_eval["Q"][1:dgp.particle_group_eval, :] .= function_evals
+
+
+end
+
+
+"""
+Generate kernel code to evaluate polynomials.
+"""
+function horner_eval(polynomials, x, outputs)
+    @assert length(polynomials) == length(outputs)
+    symbolx = :x
+    body = "$(string(symbolx)) = $x\n"
+    for (px, poly) in enumerate(polynomials)
+        p = length(poly) - 1
+        expr = :($(poly[p]))
+        for px in p-1:-1:0
+            expr = :($(poly[px]) + $symbolx * $expr)
+        end
+        expr = "$(outputs[px]) = $(string(expr))"
+        body *= expr * "\n"
+    end
+    
+    return body
+end
+
+
+"""
+Create a PPMD Kernel to evaluate a set of basis functions at the reference positions.
+"""
+function get_basis_product_eval_kernel(basis, ndim, symbol_positions, symbol_evals)
+    offset = 1
+    ndof = length(basis)
+    eval_code = ""
+    for dimx in 1:ndim
+        eval_code *= horner_eval(
+            basis, "$(symbol_positions)[ix, $dimx]", ["$(symbol_evals)[ix, $dx]" for dx in offset:offset+ndof-1]
+        )
+        offset += ndof
+    end
+    return eval_code
+end
+
+
+"""
+Create a Lagrange basis from a set of nodes.
+"""
+function create_lagrange_basis(roots)
+    
+    p = length(roots)
+    basis = Array{Polynomial}(undef, p)
+    for px in 1:p
+        rootspx = copy(roots)
+        deleteat!(rootspx, px)
+        basis[px] = fromroots(rootspx)
+    end
+    
+    return basis
+
+end
+
+
+"""
+Set the position of the nodes in the reference cell and create the loops that
+evaluate the lagrange polynomial basis for these nodes.
+"""
+function set_lagrange_nodes(dgp::DGProject2D, nodes)
+    dgp.nodes = nodes
+    
+    basis = create_lagrange_basis(nodes)
+    
+    @assert length(basis) == dgp.p + 1
+
+    ndim = dgp.mesh.domain.ndim
+
+    dgp.basis_eval_loop_leg_A = ParticleLoop(
+        dgp.particle_group_source.compute_target,
+        Kernel(
+            "lagrange_basis_eval",
+            get_basis_product_eval_kernel(basis, ndim, "_P_REFERENCE", "_BASIS_EVAL")
+        ),
+        Dict(
+             "_P_REFERENCE" => (dgp.particle_group_source["_P_REFERENCE"], READ),
+             "_BASIS_EVAL" => (dgp.particle_group_source["_BASIS_EVAL"], INC_ZERO),
+        )
+
+    )
+end
+
+
+"""
+Get a ParticleDat name for the incoming function evaluations
+"""
+function get_input_name(dgp, ncomp)
+    dat_name = "_Q$ncomp"
+    return dat_name
+end
+
+
+"""
+Store function evaluations in JFPI dof format on the mesh.
+"""
+function set_eval_values(dgp, values)
+    
+    nvalues, ncomp = size(values)
+
+    npart_local = dgp.particle_group_eval.npart_local
+    @assert nvalues == npart_local
+
+    dat_name = get_input_name(dgp, ncomp)
+    if haskey(dgp.particle_group_eval.particle_dats, dat_name)
+        input_dat = dgp.particle_group_eval.particle_dats[dat_name]
+    else
+        input_dat = PPMD.get_add_dat(dgp.particle_group_eval, dat_name, ncomp, Float64)
+    end
+    
+    # copy the function evaluations onto the particles at the nodes
+    input_dat[1:npart_local, :] .= values
+    
+    # populate the dofs on the mesh using the values placed on the particles.
+    
+    #TODO
+
+end
+
+
+
+"""
 Set the locations of the dofs in the cell
 """
 function set_eval_positions(dgp, positions=nothing, cells=nothing)
@@ -273,6 +438,12 @@ function set_eval_positions(dgp, positions=nothing, cells=nothing)
     # eval basis functions at particle locations
     execute(dgp.basis_eval_loop_E)
 
+    # get the nodal positions along [-1, 1]
+    @assert dgp.particle_group_eval.npart_local >= dgp.p + 1
+    nodes = extract_nodes(dgp.p, dgp.particle_group_eval["_P_REFERENCE"][1:dgp.p+1, :])
+    
+    # create the loops to evaluate lagrange basis formed from these nodes
+    set_lagrange_nodes(dgp, nodes)
 end
 
 
