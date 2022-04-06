@@ -145,6 +145,8 @@ mutable struct DGProject2D
     eval_pairloop
     
     # variables for evaluating FEM functions at particle locations
+    lagrange_assemble_pairloop
+    lagrange_eval_pairloop
     nodes
     basis_eval_loop_leg_A
 
@@ -244,6 +246,12 @@ mutable struct DGProject2D
         # i.e. there is a seperate PairLoop for scalars and vectors
         eval_pairloop = Dict{Int, Any}()
 
+        # pairloops for assembling external dofs on a celldat
+        lagrange_assemble_pairloop = Dict{Int, Any}()
+
+        # pairloops for evaluating the nodal basis expansions at the particle
+        # locations
+        lagrange_eval_pairloop = Dict{String, Any}()
         n = new(
             p, 
             particle_group_source, 
@@ -263,6 +271,8 @@ mutable struct DGProject2D
             cell_basis_invmass,
             assemble_pairloop,
             eval_pairloop,
+            lagrange_assemble_pairloop,
+            lagrange_eval_pairloop,
         )
         
         return n
@@ -330,8 +340,14 @@ function create_lagrange_basis(roots)
     basis = Array{Polynomial}(undef, p)
     for px in 1:p
         rootspx = copy(roots)
+        nonzero = roots[px]
         deleteat!(rootspx, px)
-        basis[px] = fromroots(rootspx)
+        poly = fromroots(rootspx)
+
+        # scale the polynomial to be 1 at the nonzero node.
+        scale = poly(nonzero)
+        poly = poly / scale
+        basis[px] = poly
     end
     
     return basis
@@ -377,11 +393,94 @@ end
 
 
 """
+Get or create the CellDat for a given number of components
+"""
+function get_celldat(dgp::DGProject2D, ncomp)
+
+    target_device = dgp.particle_group_source.compute_target
+
+    if haskey(dgp.cell_dofs, ncomp)
+        cell_dofs_dat = dgp.cell_dofs[ncomp]
+    else
+        domain = dgp.mesh.domain
+        cell_dofs_dat = CellDat(dgp.mesh, ((dgp.p+1) ^ domain.ndim, ncomp), Float64, target_device)
+        dgp.cell_dofs[ncomp] = cell_dofs_dat
+    end
+
+    return cell_dofs_dat
+end
+
+
+"""
+Get or create the pairloop to assign values to the correct dofs
+"""
+function get_eval_dof_assign_pairloop(dgp::DGProject2D, ncomp)
+
+    if haskey(dgp.lagrange_assemble_pairloop, ncomp)
+        assemble_pairloop = dgp.lagrange_assemble_pairloop[ncomp]
+    else
+        cell_dofs_dat = get_celldat(dgp, ncomp)
+        E = dgp.particle_group_eval
+
+        nodes_str = join(dgp.nodes, ",")
+
+        ndof = dgp.p + 1
+
+        target_device = dgp.particle_group_source.compute_target
+        assemble_pairloop = PairLoop(
+            target_device,
+            Kernel(
+                "lagrange_assemble_pairloop",
+                """
+                
+                nodes = [$nodes_str]
+
+                flag = abs(P[ix, 1] - nodes[mod1(INDICES[1], $ndof)]) < 1E-8
+                for dimx in 2:$(dgp.mesh.domain.ndim)
+                    flag &= abs(P[ix, dimx] - nodes[mod1(INDICES[dimx], $ndof)]) < 1E-8
+                end
+                if flag
+                    for quantityx in 1:$ncomp
+                        contribution = Q[ix, quantityx]
+                        DOFS[quantityx] = contribution
+                    end
+                end
+                """
+            ),
+            Dict(
+                 "INDICES" => (dgp.cell_basis_indices, READ),
+                 "DOFS" => (cell_dofs_dat, INC_ZERO),
+            ),
+            Dict(
+                "P" => (E["_P_REFERENCE"], READ),
+                "Q" => (E[get_input_name(dgp, ncomp)], READ),
+            ),
+        )
+        dgp.lagrange_assemble_pairloop[ncomp] = assemble_pairloop
+    end
+
+    return assemble_pairloop
+end
+
+
+"""
 Store function evaluations in JFPI dof format on the mesh.
 """
 function set_eval_values(dgp, values)
     
-    nvalues, ncomp = size(values)
+    size_values = size(values)
+    input_ndim = length(size_values)
+    @assert input_ndim < 3
+    
+    nvalues = size_values[1]
+    ncomp = -1
+    if input_ndim == 1
+        ncomp = 1
+        values = reshape(values, (nvalues, ncomp))
+    elseif input_ndim == 2
+        ncomp = size_values[2]
+    end
+    @assert ncomp > 0
 
     npart_local = dgp.particle_group_eval.npart_local
     @assert nvalues == npart_local
@@ -394,11 +493,10 @@ function set_eval_values(dgp, values)
     end
     
     # copy the function evaluations onto the particles at the nodes
-    input_dat[1:npart_local, :] .= values
+    input_dat[1:npart_local, :] = values
     
     # populate the dofs on the mesh using the values placed on the particles.
-    
-    #TODO
+    execute(get_eval_dof_assign_pairloop(dgp, ncomp))
 
 end
 
@@ -470,14 +568,7 @@ function project(dgp, quantity)
 
         target_device = dgp.particle_group_source.compute_target
         ncomp = dgp.particle_group_source[quantity].ncomp
-        if haskey(dgp.cell_dofs, ncomp)
-            cell_dofs_dat = dgp.cell_dofs[ncomp]
-        else
-            @assert dgp.particle_group_source[quantity].dtype == Float64
-            domain = dgp.mesh.domain
-            cell_dofs_dat = CellDat(dgp.mesh, ((dgp.p+1) ^ domain.ndim, ncomp), Float64, target_device)
-            dgp.cell_dofs[ncomp] = cell_dofs_dat
-        end
+        cell_dofs_dat = get_celldat(dgp, ncomp)
 
         # space for dofs in each cell
         # pairloop to assemble dofs
@@ -527,9 +618,10 @@ end
 
 
 """
-Evaluate the projected field at the evaluation positions.
+Evaluate the projected particle QOI at the evaluation positions required by the
+external FEM implementation.
 """
-function evaluate(dgp, quantity)
+function evaluate(dgp, quantity::String)
 
     ncomp = dgp.particle_group_source[quantity].ncomp
 
@@ -570,7 +662,6 @@ function evaluate(dgp, quantity)
             ),
             Dict(
                  "INDICES" => (dgp.cell_basis_indices, READ),
-                 "IMASS" => (dgp.cell_basis_invmass, READ),
                  "DOFS" => (cell_dofs_dat, READ),
             ),
             Dict(
@@ -585,6 +676,66 @@ function evaluate(dgp, quantity)
 
     return dat_name
 end
+
+
+"""
+Evaluate the external FEM field at the particle positions.
+"""
+function field_evaluate(dgp::DGProject2D, quantity::String)
+
+    ncomp = dgp.particle_group_source[quantity].ncomp
+
+    # get the PairLoop that evaluates the quantity at the requested positions.
+    if haskey(dgp.lagrange_eval_pairloop, quantity)
+        eval_pairloop = dgp.lagrange_eval_pairloop[quantity]
+    else
+        cell_dofs_dat = dgp.cell_dofs[ncomp]
+
+        target_device = dgp.particle_group_source.compute_target
+
+        A = dgp.particle_group_source
+        ndim = A.domain.ndim
+
+        # pairloop to evaluate field at points in E
+        eval_pairloop = PairLoop(
+            target_device,
+            Kernel(
+                "lagrange_eval_pairloop",
+                """
+                basis_eval = _BASIS_EVAL[ix, INDICES[1]]
+                for dimx in 2:$(ndim)
+                    basis_eval *= _BASIS_EVAL[ix, INDICES[dimx]]
+                end
+                for quantityx in 1:$ncomp
+                    contribution = DOFS[quantityx]
+                    Q[ix, quantityx] += basis_eval * contribution
+                end
+                """
+            ),
+            Dict(
+                 "INDICES" => (dgp.cell_basis_indices, READ),
+                 "DOFS" => (cell_dofs_dat, READ),
+            ),
+            Dict(
+                "_BASIS_EVAL" => (A["_BASIS_EVAL"], READ),
+                "Q" => (A[quantity], INC_ZERO),
+            ),
+        )
+        dgp.lagrange_eval_pairloop[quantity] = eval_pairloop
+    end
+
+    # bin particles into cells
+    execute(dgp.cell_bin_loop_A)
+    # map to refence positions
+    execute(dgp.reference_position_loop_A)
+    # evaluate the basis at the particle locations
+    execute(dgp.basis_eval_loop_leg_A)
+    # take product of basis functions and multiply by dofs
+    execute(eval_pairloop)
+
+    return
+end
+
 
 
 """
