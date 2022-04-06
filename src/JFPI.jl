@@ -579,7 +579,7 @@ function project(dgp, quantity)
                 "assemble_pairloop",
                 """
                 basis_eval = _BASIS_EVAL[ix, INDICES[1]]
-                for dimx in 2:$(domain.ndim)
+                for dimx in 2:$(dgp.mesh.domain.ndim)
                     basis_eval *= _BASIS_EVAL[ix, INDICES[dimx]]
                 end
                 for quantityx in 1:$ncomp
