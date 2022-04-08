@@ -148,7 +148,7 @@ mutable struct DGProject2D
     lagrange_assemble_pairloop
     lagrange_eval_pairloop
     nodes
-    basis_eval_loop_leg_A
+    basis_eval_loop_lag_A
 
     function DGProject2D(particle_group_source::ParticleGroup, p::Int64, nx::Int64, ny::Int64)
         
@@ -282,18 +282,6 @@ end
 
 
 """
-Evaluate function at source particle positions.
-"""
-function evaluate_function(dgp, function_evals)
-
-    # set the evaluations on the evaluation points
-    dgp.particle_group_eval["Q"][1:dgp.particle_group_eval, :] .= function_evals
-
-
-end
-
-
-"""
 Generate kernel code to evaluate polynomials.
 """
 function horner_eval(polynomials, x, outputs)
@@ -368,7 +356,7 @@ function set_lagrange_nodes(dgp::DGProject2D, nodes)
 
     ndim = dgp.mesh.domain.ndim
 
-    dgp.basis_eval_loop_leg_A = ParticleLoop(
+    dgp.basis_eval_loop_lag_A = ParticleLoop(
         dgp.particle_group_source.compute_target,
         Kernel(
             "lagrange_basis_eval",
@@ -729,7 +717,7 @@ function field_evaluate(dgp::DGProject2D, quantity::String)
     # map to refence positions
     execute(dgp.reference_position_loop_A)
     # evaluate the basis at the particle locations
-    execute(dgp.basis_eval_loop_leg_A)
+    execute(dgp.basis_eval_loop_lag_A)
     # take product of basis functions and multiply by dofs
     execute(eval_pairloop)
 
